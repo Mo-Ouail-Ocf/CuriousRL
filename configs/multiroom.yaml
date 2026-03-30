@@ -1,0 +1,4 @@
+env:
+  name: "MiniGrid-MultiRoom-N4-S5-v0"
+  max_steps: 1000
+  n_envs: 16

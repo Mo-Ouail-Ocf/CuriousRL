@@ -1,0 +1,77 @@
+run:
+  seed: 42
+  log_dir: "runs/"
+  use_wandb: false
+  wandb_project: "minigrid-curiosity"
+
+env:
+  name: "MiniGrid-DoorKey-8x8-v0"
+  max_steps: 300
+  n_envs: 16
+
+agent:
+  embed_dim: 64
+  lstm_hidden_size: 128
+
+ppo:
+  n_steps: 128
+  seq_len: 16
+  n_epochs: 4
+  n_minibatches: 4
+  clip_coef: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  lr: 1.0e-4
+  anneal_lr: true
+  total_timesteps: 10_000_000
+  gamma: 0.99
+  gae_lambda: 0.95
+  normalize_advantage: true
+
+curiosity:
+  method: "none"          # "none" | "icm" | "rnd" | "noveld"
+  lambda_int: 1.0
+  gamma_int: 0.99
+  gamma_ext: 0.99
+
+icm:
+  feature_dim: 64
+  inverse_weight: 0.2
+  forward_weight: 0.8
+  lr: 1.0e-4
+
+rnd:
+  output_dim: 64
+  lr: 1.0e-4
+  update_proportion: 0.25
+  warmup_steps: 1000
+
+noveld:
+  alpha: 0.5
+  use_episodic_count: true
+  use_global_pos_hash: true
+
+checkpoint:
+  save_freq: 100
+  save_what:
+    - model_weights
+    - optimizer_state
+    - normalizer_stats
+
+logging:
+  log_freq: 10
+  print_freq: 10
+
+# [PHASE3] — defined but inactive
+lewm:
+  enabled: false
+  latent_dim: 128
+  predictor_hidden_dim: 256
+  action_emb_dim: 32
+  sigreg_weight: 1.0
+  sigreg_n_projections: 64
+  replay_buffer_size: 50_000
+  batch_size: 128
+  lr: 1.0e-4
+  warmup_steps: 5_000

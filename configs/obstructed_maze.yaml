@@ -1,0 +1,4 @@
+env:
+  name: "MiniGrid-ObstructedMaze-2Dlh-v1"
+  max_steps: 2000
+  n_envs: 16

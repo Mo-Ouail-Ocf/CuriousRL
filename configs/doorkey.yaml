@@ -1,0 +1,4 @@
+env:
+  name: "MiniGrid-DoorKey-8x8-v0"
+  max_steps: 300
+  n_envs: 16

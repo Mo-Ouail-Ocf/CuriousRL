@@ -1,0 +1,8 @@
+torch>=2.0.0
+gymnasium>=0.29.0
+minigrid>=2.3.0
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+numpy>=1.24.0
+tensorboard>=2.13.0
+wandb>=0.15.0  # optional
