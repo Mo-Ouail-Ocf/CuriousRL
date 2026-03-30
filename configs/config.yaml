@@ -1,7 +1,7 @@
 run:
   seed: 42
   log_dir: "runs/"
-  use_wandb: false
+  use_wandb: true
   wandb_project: "minigrid-curiosity"
 
 env:
