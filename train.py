@@ -3,8 +3,7 @@ train.py
 
 Main training entry point for the MiniGrid Curiosity Benchmark.
 
-Phase 1 — Vanilla PPO-LSTM | PPO-LSTM+ICM | PPO-LSTM+RND | PPO-LSTM+NovelD
-Phase 3 — LeWM-NovelD (future, NOT now). All insertion points marked [PHASE3-HOOK].
+— Vanilla PPO-LSTM | PPO-LSTM+ICM | PPO-LSTM+RND | PPO-LSTM+NovelD
 
 Usage:
   python train.py                             # uses configs/config.yaml
@@ -18,6 +17,7 @@ import random
 import time
 import numpy as np
 import torch
+from tqdm import tqdm
 
 # Hydra for config management
 import hydra
@@ -26,13 +26,11 @@ from omegaconf import DictConfig, OmegaConf
 from envs.wrappers import make_envs
 from agent.agent import Agent
 from curiosity.factory import build_curiosity
-from curiosity.noveld import NovelDModule
-from curiosity.rnd import RNDModule
 from ppo.rollout import RolloutBuffer
 from ppo.gae import compute_gae
 from ppo.update import ppo_update
-from utils.running_stats import RewardNormalizer
 from utils.logger import Logger
+from curiosity.noveld import NovelDModule, RNDModule
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,15 +76,6 @@ def load_checkpoint(path, agent, optimizer, curiosity_module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Intrinsic reward normalization for ICM / RND (NovelD handles own)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def normalize_int_rewards(rewards: np.ndarray, normalizer: RewardNormalizer) -> np.ndarray:
-    """Divide by running std only — never subtract mean (Constraint 13)."""
-    return normalizer.normalize(rewards)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Warmup loop
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -105,7 +94,7 @@ def run_warmup(envs, curiosity_module, cfg, device):
     obs, _ = envs.reset()
 
     print(f"[Warmup] Running {warmup_steps} random steps to pre-populate obs normalizer...")
-    for step in range(warmup_steps):
+    for step in tqdm(range(warmup_steps), desc="Warmup"):
         actions = np.array([envs.single_action_space.sample() for _ in range(n_envs)])
         obs_next, _, terminated, truncated, _ = envs.step(actions)
 
@@ -166,6 +155,38 @@ class EpisodeTracker:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Step-metric accumulator
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StepMetricAccumulator:
+    """
+    Accumulates scalar dicts emitted by curiosity_module.step() across all
+    rollout steps, then returns the per-key mean when flush() is called.
+
+    Previously curiosity_step_metrics was overwritten each step, so only the
+    last step's values (n_envs=16 samples out of n_steps*n_envs=2048) were
+    ever logged — making E_mean, r_int_raw_mean, etc. unreliable.
+    """
+
+    def __init__(self):
+        self._sums: dict = {}
+        self._count: int = 0
+
+    def update(self, metrics: dict):
+        for k, v in metrics.items():
+            self._sums[k] = self._sums.get(k, 0.0) + float(v)
+        self._count += 1
+
+    def flush(self) -> dict:
+        if self._count == 0:
+            return {}
+        out = {k: v / self._count for k, v in self._sums.items()}
+        self._sums.clear()
+        self._count = 0
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main training function
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -198,9 +219,6 @@ def main(cfg: DictConfig):
     # ── Curiosity module ──────────────────────────────────────────────────
     curiosity_module = build_curiosity(cfg, n_actions, device)
 
-    # Intrinsic reward normalizer for ICM/RND (NovelD handles its own)
-    int_reward_normalizer = RewardNormalizer() if cfg.curiosity.method in ("icm", "rnd") else None
-
     # ── Rollout buffer ─────────────────────────────────────────────────────
     buffer = RolloutBuffer(cfg, cfg.agent.lstm_hidden_size, device)
 
@@ -219,12 +237,13 @@ def main(cfg: DictConfig):
     done = np.zeros(n_envs, dtype=bool)
 
     ep_tracker = EpisodeTracker(n_envs)
+    step_metric_acc = StepMetricAccumulator()   # ← accumulate across steps
     global_step = 0
     start_time = time.time()
 
     print(f"\n[Train] Starting: {num_updates} updates × {batch_size} steps = {total_timesteps} total")
 
-    for update in range(1, num_updates + 1):
+    for update in tqdm(range(1, num_updates + 1), desc="Training"):
         # ── Rollout ───────────────────────────────────────────────────────
         for step in range(n_steps):
             global_step += n_envs
@@ -245,32 +264,19 @@ def main(cfg: DictConfig):
             dones = terminated | truncated
 
             # ── Curiosity ─────────────────────────────────────────────────
-            if curiosity_module is not None:
-                obs_t1 = torch.tensor(obs_next, device=device)
-
-                # Update RND obs normalizer BEFORE compute_surprise (Constraint 11)
-                if isinstance(curiosity_module, (RNDModule, NovelDModule)):
-                    obs_np_next = obs_next  # uint8 numpy
-                    if isinstance(curiosity_module, NovelDModule):
-                        curiosity_module.update_obs_normalizer(obs_np_next)
-                    else:
-                        curiosity_module.update_obs_normalizer(obs_np_next)
-
-                if isinstance(curiosity_module, NovelDModule):
-                    rewards_int_norm, noveld_metrics = curiosity_module.compute_surprise(
-                        obs_t1, infos, dones
-                    )
-                    rewards_int = rewards_int_norm
-                else:
-                    with torch.no_grad():
-                        rewards_int_raw = curiosity_module.compute_surprise(
-                            obs_t, action, obs_t1
-                        ).cpu().numpy()
-                    rewards_int = normalize_int_rewards(rewards_int_raw, int_reward_normalizer)
-                    noveld_metrics = {}
-            else:
+            # Unified interface: train.py never branches on method.
+            if curiosity_module is None:
                 rewards_int = np.zeros(n_envs, dtype=np.float32)
-                noveld_metrics = {}
+                step_metrics = {}
+            else:
+                obs_t1 = torch.tensor(obs_next, device=device)
+                rewards_int, step_metrics = curiosity_module.step(
+                    obs_t, action, obs_t1, infos, dones
+                )
+
+            # Accumulate step metrics across the whole rollout (fix: was
+            # overwriting so only the last step was ever logged)
+            step_metric_acc.update(step_metrics)
 
             # ── Buffer ────────────────────────────────────────────────────
             buffer.add(
@@ -291,7 +297,6 @@ def main(cfg: DictConfig):
             ep_tracker.update(rewards_ext, dones)
 
             # DETAIL 3: LSTM reset on done (handled inside agent.forward)
-            # We just advance the state; resets happen in next forward call.
             lstm_state = lstm_state_new
 
             obs = obs_next
@@ -316,8 +321,8 @@ def main(cfg: DictConfig):
             act_all = torch.tensor(
                 buffer.actions.reshape(-1), device=device, dtype=torch.long
             )
-            # obs_t1: shift by 1 (approximate — exact t+1 not stored separately)
-            # Use obs[1:] + last obs as t+1 proxy
+            # obs_t1: shift buffer.obs by 1 step, use current obs as last t+1.
+            # This is an approximation (exact t+1 not stored separately in buffer).
             obs_t1_np = np.concatenate(
                 [buffer.obs[1:], obs[np.newaxis]], axis=0
             ).reshape(-1, 7, 7, 3)
@@ -347,7 +352,8 @@ def main(cfg: DictConfig):
             }
             log_metrics.update(ppo_metrics)
             log_metrics.update(curiosity_metrics)
-            log_metrics.update(noveld_metrics)
+            # Flush the accumulated per-step metrics (mean over full rollout)
+            log_metrics.update(step_metric_acc.flush())
 
             ep_stats = ep_tracker.flush()
             log_metrics.update(ep_stats)

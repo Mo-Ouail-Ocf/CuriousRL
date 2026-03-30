@@ -3,10 +3,6 @@ curiosity/factory.py
 
 build_curiosity(cfg, n_actions, device) → module or None.
 
-# [PHASE3-HOOK] register LeWMCuriosity here:
-#   elif cfg.curiosity.method == "lewm_noveld":
-#       from .lewm_noveld import LeWMNovelD
-#       return LeWMNovelD(cfg, device)
 """
 
 import torch
